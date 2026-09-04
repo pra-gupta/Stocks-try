@@ -5,7 +5,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
 st.set_page_config(page_title="Live Sector Breakout Screener", layout="wide")
-st.title("📈 Live Sector Breakout Screener with Financial Charts")
+st.title("📈 Live Sector Breakout Screener with Advanced Metrics")
 
 # Target sectors and their representative NSE tickers
 SECTOR_TICKERS = {
@@ -41,6 +41,8 @@ def fetch_live_market_data(sectors):
             t = yf.Ticker(ticker)
             info = t.info
             fin = t.financials
+            # Fetch max history to calculate true All-Time High price
+            hist_max = t.history(period="max")
             
             is_ath_sales = False
             is_ath_profit = False
@@ -61,23 +63,42 @@ def fetch_live_market_data(sectors):
                     "Net Income": net_income
                 }).dropna()
                 
-                # Format dates to Years and sort chronologically (oldest to newest)
                 hist_df.index = pd.to_datetime(hist_df.index).year.astype(str)
                 hist_df = hist_df.sort_index().tail(4)
                 
                 # Convert values to ₹ Crores
                 hist_df = hist_df / 10**7
 
+            current_price = info.get("currentPrice") or info.get("previousClose", 0)
             profit_growth = round((info.get("earningsQuarterlyGrowth") or 0) * 100, 2)
-            clean_ticker = ticker.replace(".NS", "")
             
+            # 1. Percent down from All-Time High (ATH)
+            ath_price = hist_max["High"].max() if not hist_max.empty else current_price
+            percent_down_ath = 0
+            if ath_price and ath_price > 0 and current_price:
+                percent_down_ath = max(0, round(((ath_price - current_price) / ath_price) * 100, 2))
+                
+            # 2. PEG Ratio
+            peg_ratio = info.get("pegRatio") or info.get("trailingPegRatio")
+            peg_ratio = round(peg_ratio, 2) if peg_ratio else None
+            
+            # 3. Shareholding Patterns (Convert from decimals to %)
+            # In yfinance, Insiders = Promoters, Institutions = FII/DII combined
+            promoter_holding = round((info.get("heldPercentInsiders") or 0) * 100, 2)
+            fii_holding = round((info.get("heldPercentInstitutions") or 0) * 100, 2)
+
+            clean_ticker = ticker.replace(".NS", "")
             financial_histories[clean_ticker] = hist_df
             
             results.append({
                 "Ticker": clean_ticker,
                 "Company": info.get("shortName", ticker),
                 "Sector": sector,
-                "Price (₹)": info.get("currentPrice") or info.get("previousClose", 0),
+                "Price (₹)": current_price,
+                "% Down from ATH": percent_down_ath,
+                "PEG Ratio": peg_ratio,
+                "Promoter (%)": promoter_holding,
+                "FII (%)": fii_holding,
                 "ATH Sales": is_ath_sales,
                 "ATH Profit": is_ath_profit,
                 "Profit Breakout YoY (%)": profit_growth
@@ -94,6 +115,7 @@ if st.button("Run Live Scan"):
     df, financial_histories = fetch_live_market_data(selected_sectors)
     
     if not df.empty:
+        # Sort and filter based on user inputs
         filtered_df = df[
             (df["ATH Sales"] == True) & 
             (df["ATH Profit"] == True) & 
@@ -101,7 +123,24 @@ if st.button("Run Live Scan"):
         ].sort_values(by="Profit Breakout YoY (%)", ascending=False)
         
         st.subheader(f"✅ Matching Assets ({len(filtered_df)} found)")
-        st.dataframe(filtered_df, use_container_width=True, hide_index=True)
+        
+        # Display DataFrame with new columns
+        st.dataframe(
+            filtered_df, 
+            use_container_width=True, 
+            hide_index=True,
+            column_config={
+                "% Down from ATH": st.column_config.ProgressColumn(
+                    "% Down from ATH",
+                    help="How far the stock is from its lifetime highest price",
+                    format="%f %%",
+                    min_value=0,
+                    max_value=100,
+                ),
+                "Promoter (%)": st.column_config.NumberColumn("Promoter (%)", format="%f %%"),
+                "FII (%)": st.column_config.NumberColumn("FII (%)", format="%f %%")
+            }
+        )
         
         # Plotly Charts Section for Passing Assets
         if not filtered_df.empty:
@@ -121,7 +160,6 @@ if st.button("Run Live Scan"):
                         subplot_titles=("Total Revenue (₹ Cr)", "Net Income (₹ Cr)")
                     )
                     
-                    # Revenue Bar Chart
                     fig.add_trace(
                         go.Bar(
                             x=hist.index, 
@@ -134,7 +172,6 @@ if st.button("Run Live Scan"):
                         row=1, col=1
                     )
                     
-                    # Net Income Bar Chart
                     fig.add_trace(
                         go.Bar(
                             x=hist.index, 
