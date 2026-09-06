@@ -52,7 +52,8 @@ def generate_ticker_candidates(raw_symbol, company_name=""):
         clean = clean[:-2]
         
     company_clean = str(company_name).strip()
-    base = clean.replace("-SM.NS", "").replace(".NS", "").replace(".BO", "")
+##    base = clean.replace("-SM.NS", "").replace(".NS", "").replace(".BO", "")
+    base = clean
     
     # Extract first word of company name in uppercase
     company_first_name = ""
@@ -65,8 +66,6 @@ def generate_ticker_candidates(raw_symbol, company_name=""):
         candidates = [f"{base}.BO"]
         if company_first_name:
             candidates.append(f"{company_first_name}.BO")
-            candidates.append(f"{company_first_name}.NS")
-            candidates.append(f"{company_first_name}-SM.NS")
         candidates.append(f"{base}.NS")
     elif clean.endswith(".BO"):
         candidates = [f"{base}.BO", f"{base}.NS", f"{base}-SM.NS"]
