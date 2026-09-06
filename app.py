@@ -9,7 +9,7 @@ st.set_page_config(page_title="Live Sector Breakout Screener", layout="wide")
 st.title("📈 Live Sector Breakout Screener")
 
 # 1. Load Sector, Company, and Symbol from master_stock_list.csv
-@st.cache_data(ttl=86400)
+##@st.cache_data(ttl=86400)
 def load_stock_master():
     try:
         df = pd.read_csv("master_stock_list.csv")
