@@ -65,11 +65,8 @@ def generate_ticker_candidates(raw_symbol, company_name=""):
         candidates = [f"{base}.BO"]
         if company_first_name:
             candidates.append(f"{company_first_name}.BO")
-        candidates.append(f"{base}.NS")
-    elif clean.endswith(".BO"):
-        candidates = [f"{base}.BO", f"{base}.NS", f"{base}-SM.NS"]
     else:
-        candidates = [f"{base}.NS", f"{base}-SM.NS", f"{base}.BO"]
+        candidates = [f"{base}.NS", f"{base}-SM.NS"]
         
     # Preserve order while removing duplicates
     seen = set()
