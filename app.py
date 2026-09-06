@@ -52,8 +52,7 @@ def generate_ticker_candidates(raw_symbol, company_name=""):
         clean = clean[:-2]
         
     company_clean = str(company_name).strip()
-##    base = clean.replace("-SM.NS", "").replace(".NS", "").replace(".BO", "")
-    base = clean
+    base = clean.replace("SCRIP-", "")
     
     # Extract first word of company name in uppercase
     company_first_name = ""
