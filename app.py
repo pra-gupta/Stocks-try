@@ -113,7 +113,7 @@ if not df_master.empty:
             csv_mcap = float(row.get('MarketCapCSV', 0))
             
             base_symbol, candidate_tickers = generate_ticker_candidates(raw_symbol, company_name)
-            
+            print(str(candidate_tickers))
             t = None
             hist_recent = pd.DataFrame()
             resolved_ticker = None
