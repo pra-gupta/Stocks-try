@@ -41,11 +41,9 @@ def generate_ticker_candidates(raw_symbol, company_name=""):
     - Numeric Tickers:
         1. Base + .BO (e.g., 500325.BO)
         2. First name of Company in UPPERCASE + .BO (e.g., RELIANCE.BO)
-        3. Subsequent fallbacks (.NS, -SM.NS)
     - Non-Numeric Tickers:
-        1. Standard .NS (or .BO if ending in .BO)
+        1. Standard .NS
         2. NSE SME -SM.NS
-        3. BSE .BO
     """
     clean = str(raw_symbol).strip()
     if clean.endswith(".0"):
@@ -59,7 +57,7 @@ def generate_ticker_candidates(raw_symbol, company_name=""):
     if company_clean:
         words = [w for w in company_clean.split() if w.strip()]
         if words:
-            company_first_name = "".join(ch for ch in words[0] if ch.isalnum()).upper()
+            company_first_name = "".join(ch.upper() for ch in words[0]
             
     if base.isdigit():
         candidates = [f"{base}.BO"]
