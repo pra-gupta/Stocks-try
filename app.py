@@ -35,26 +35,49 @@ def load_stock_master():
 
 df_master = load_stock_master()
 
-def generate_ticker_candidates(raw_symbol):
+def generate_ticker_candidates(raw_symbol, company_name=""):
     """
     Generates ordered ticker candidates:
-    1. Standard .NS
-    2. NSE SME -SM.NS
-    3. BSE .BO
+    - Numeric Tickers:
+        1. Base + .BO (e.g., 500325.BO)
+        2. First name of Company in UPPERCASE + .BO (e.g., RELIANCE.BO)
+        3. Subsequent fallbacks (.NS, -SM.NS)
+    - Non-Numeric Tickers:
+        1. Standard .NS (or .BO if ending in .BO)
+        2. NSE SME -SM.NS
+        3. BSE .BO
     """
     clean = str(raw_symbol).strip()
+    if clean.endswith(".0"):
+        clean = clean[:-2]
+        
+    company_clean = str(company_name).strip()
     base = clean.replace("-SM.NS", "").replace(".NS", "").replace(".BO", "")
     
-    if clean.endswith(".BO"):
+    # Extract first word of company name in uppercase
+    company_first_name = ""
+    if company_clean:
+        words = [w for w in company_clean.split() if w.strip()]
+        if words:
+            company_first_name = "".join(ch for ch in words[0] if ch.isalnum()).upper()
+            
+    if base.isdigit():
+        candidates = [f"{base}.BO"]
+        if company_first_name:
+            candidates.append(f"{company_first_name}.BO")
+            candidates.append(f"{company_first_name}.NS")
+            candidates.append(f"{company_first_name}-SM.NS")
+        candidates.append(f"{base}.NS")
+    elif clean.endswith(".BO"):
         candidates = [f"{base}.BO", f"{base}.NS", f"{base}-SM.NS"]
     else:
         candidates = [f"{base}.NS", f"{base}-SM.NS", f"{base}.BO"]
         
-    # Remove duplicates preserving order
+    # Preserve order while removing duplicates
     seen = set()
     ordered = []
     for c in candidates:
-        if c not in seen:
+        if c and c not in seen:
             seen.add(c)
             ordered.append(c)
     return base, ordered
@@ -67,7 +90,10 @@ def get_financial_row(df_fin, candidates):
         idx_str = str(idx).strip().lower()
         for cand in candidates:
             if cand.lower() == idx_str:
-                return df_fin.loc[idx]
+                res = df_fin.loc[idx]
+                if isinstance(res, pd.DataFrame):
+                    return res.iloc[0]
+                return res
     return None
 
 if not df_master.empty:
@@ -93,13 +119,13 @@ if not df_master.empty:
             company_name = str(row['Company']).strip()
             csv_mcap = float(row.get('MarketCapCSV', 0))
             
-            base_symbol, candidate_tickers = generate_ticker_candidates(raw_symbol)
+            base_symbol, candidate_tickers = generate_ticker_candidates(raw_symbol, company_name)
             
             t = None
             hist_recent = pd.DataFrame()
             resolved_ticker = None
             
-            # 3-Tier Fallback Resolution Sequence (.NS -> -SM.NS -> .BO)
+            # Fallback Resolution Sequence
             for cand in candidate_tickers:
                 try:
                     temp_t = yf.Ticker(cand)
@@ -162,6 +188,7 @@ if not df_master.empty:
                         "Net Income": net_series
                     }).fillna(0)
                     hist_df.index = pd.to_datetime(hist_df.index).year.astype(str)
+                    hist_df = hist_df.groupby(hist_df.index).first()
                     hist_df = hist_df.sort_index().tail(4) / 10**7 # Convert to ₹ Cr
 
             # Profit Growth Calculation
