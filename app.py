@@ -14,7 +14,6 @@ def load_stock_master():
     try:
         df = pd.read_csv("master_stock_list.csv")
         
-        # Standardize column mappings based on your master CSV structure
         column_mapping = {
             "Symbol": "Symbol", "symbol": "Symbol", "SYMBOL": "Symbol",
             "Company Name": "Company", "Company": "Company", "company": "Company",
@@ -28,8 +27,6 @@ def load_stock_master():
         df["Company"] = df["Company Name"] if "Company Name" in df.columns else df["Company"].astype(str).str.strip()
         df["Sector"] = df["Sector"].astype(str).str.strip()
         
-        # Filter out numeric BSE scrips (e.g., '208501.BO') since they lack reliable financial histories on yfinance
-        # Keep clean NSE tickers ending in .NS
         valid_df = df[df["Symbol"].str.endswith(".NS", na=False)].copy()
         return valid_df[["Symbol", "Company", "Sector"]]
     except FileNotFoundError:
@@ -39,7 +36,6 @@ def load_stock_master():
 df_master = load_stock_master()
 
 if not df_master.empty:
-    # 2. Sector Selector UI
     sectors = sorted(df_master['Sector'].unique().tolist())
     selected_sector = st.selectbox("Select Target Sector", sectors)
     
@@ -47,9 +43,9 @@ if not df_master.empty:
 
     st.sidebar.header("Filter Criteria")
     min_breakout = st.sidebar.slider("Minimum Profit Breakout YoY (%)", 0, 100, 15)
-    max_scan_limit = st.sidebar.number_input("Max Stocks to Scan (Prevents API Limits)", min_value=5, max_value=200, value=50)
+    max_scan_limit = st.sidebar.number_input("Max Stocks to Scan (Prevents API Limits)", min_value=5, max_value=250, value=50)
 
-    # 3. Live Scan Logic
+    # 2. Robust Live Scan Logic with Price Fallbacks
     @st.cache_data(ttl=3600)
     def fetch_sector_live_data(sector_name, scan_limit):
         sector_df = df_master[df_master['Sector'] == sector_name].head(scan_limit)
@@ -65,19 +61,32 @@ if not df_master.empty:
             
             try:
                 t = yf.Ticker(ticker_symbol)
-                info = t.info
-                fin = t.financials
-                hist_max = t.history(period="max")
                 
-                if not info or ("currentPrice" not in info and "previousClose" not in info):
-                    progress_bar.progress((i + 1) / len(sector_df), text=f"Skipped {clean_symbol} (No Live Data)")
+                # Fetch historical prices first (most reliable source for current price & ATH)
+                hist_max = t.history(period="max")
+                hist_recent = t.history(period="5d")
+                
+                if hist_recent.empty:
+                    progress_bar.progress((i + 1) / len(sector_df), text=f"Skipped {clean_symbol} (No Price History)")
                     continue
+                
+                current_price = float(hist_recent['Close'].iloc[-1])
+                
+                # Fetch info & financials safely with fallback handling
+                try:
+                    info = t.info
+                except Exception:
+                    info = {}
+                
+                try:
+                    fin = t.financials
+                except Exception:
+                    fin = pd.DataFrame()
 
                 is_ath_sales = False
                 is_ath_profit = False
                 hist_df = pd.DataFrame()
                 
-                # Check 4-year Annual Financials
                 if not fin.empty and "Total Revenue" in fin.index and "Net Income" in fin.index:
                     revenue = fin.loc["Total Revenue"].dropna()
                     net_income = fin.loc["Net Income"].dropna()
@@ -96,11 +105,12 @@ if not df_master.empty:
                     hist_df = hist_df.sort_index().tail(4)
                     hist_df = hist_df / 10**7  # Convert to ₹ Crores
 
-                current_price = info.get("currentPrice") or info.get("previousClose", 0)
                 profit_growth = round((info.get("earningsQuarterlyGrowth") or 0) * 100, 2)
                 
-                # Live Market Cap (Converted to ₹ Crores)
+                # Live Market Cap (Converted to ₹ Crores) with fallback estimation if info is missing
                 raw_mcap = info.get("marketCap", 0)
+                if not raw_mcap and "SharesOutstanding" in info:
+                    raw_mcap = info.get("SharesOutstanding", 0) * current_price
                 market_cap_cr = round(raw_mcap / 10**7, 2) if raw_mcap else 0
                 
                 # Percent Down from Lifetime High
@@ -117,12 +127,11 @@ if not df_master.empty:
 
                 financial_histories[clean_symbol] = hist_df
                 
-                # Ordered columns: Profit Breakout YoY (%) placed directly adjacent to Price (₹)
                 results.append({
                     "Ticker": clean_symbol,
                     "Company": company_name,
                     "Sector": sector_name,
-                    "Price (₹)": current_price,
+                    "Price (₹)": round(current_price, 2),
                     "Profit Breakout YoY (%)": profit_growth,
                     "Market Cap (₹ Cr)": market_cap_cr,
                     "% Down from ATH": percent_down_ath,
@@ -135,7 +144,7 @@ if not df_master.empty:
             except Exception:
                 continue
 
-            time.sleep(0.1) # Throttle to avoid rate limits
+            time.sleep(0.05)
             progress_bar.progress((i + 1) / len(sector_df), text=f"Analyzing {clean_symbol}...")
             
         progress_bar.empty()
@@ -172,7 +181,6 @@ if not df_master.empty:
                 }
             )
             
-            # Plotly Charts Section
             if not filtered_df.empty:
                 st.markdown("---")
                 st.header("📊 4-Year Financial Trajectory (₹ Crores)")
