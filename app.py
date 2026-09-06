@@ -8,6 +8,7 @@ from plotly.subplots import make_subplots
 st.set_page_config(page_title="Live Sector Breakout Screener", layout="wide")
 st.title("📈 Live Sector Breakout Screener")
 
+# 1. Load Sector, Company, Symbol, and Market Cap from master_stock_list.csv
 @st.cache_data(ttl=86400)
 def load_stock_master():
     try:
@@ -21,18 +22,46 @@ def load_stock_master():
         df = df.rename(columns=column_mapping)
         df = df.dropna(subset=["Symbol", "Sector"])
         df["Symbol"] = df["Symbol"].astype(str).str.strip()
-        df["Company"] = df["Company Name"] if "Company Name" in df.columns else df["Company"].astype(str).str.strip()
+        df["Company"] = df["Company"].astype(str).str.strip()
         df["Sector"] = df["Sector"].astype(str).str.strip()
-        return df[["Symbol", "Company", "Sector"]]
+        if "MarketCapCSV" in df.columns:
+            df["MarketCapCSV"] = pd.to_numeric(df["MarketCapCSV"], errors="coerce").fillna(0)
+        else:
+            df["MarketCapCSV"] = 0.0
+        return df[["Symbol", "Company", "Sector", "MarketCapCSV"]]
     except FileNotFoundError:
-        st.error("`master_stock_list.csv` not found in directory.")
-        return pd.DataFrame(columns=["Symbol", "Company", "Sector"])
+        st.error("`master_stock_list.csv` not found in current directory.")
+        return pd.DataFrame(columns=["Symbol", "Company", "Sector", "MarketCapCSV"])
 
 df_master = load_stock_master()
 
+def generate_ticker_candidates(raw_symbol):
+    """
+    Generates ordered ticker candidates:
+    1. Standard .NS
+    2. NSE SME -SM.NS
+    3. BSE .BO
+    """
+    clean = str(raw_symbol).strip()
+    base = clean.replace("-SM.NS", "").replace(".NS", "").replace(".BO", "")
+    
+    if clean.endswith(".BO"):
+        candidates = [f"{base}.BO", f"{base}.NS", f"{base}-SM.NS"]
+    else:
+        candidates = [f"{base}.NS", f"{base}-SM.NS", f"{base}.BO"]
+        
+    # Remove duplicates preserving order
+    seen = set()
+    ordered = []
+    for c in candidates:
+        if c not in seen:
+            seen.add(c)
+            ordered.append(c)
+    return base, ordered
+
 def get_financial_row(df_fin, candidates):
-    """Flexible lookup for Yahoo Finance row names."""
-    if df_fin.empty:
+    """Flexible lookup for Yahoo Finance financial row names."""
+    if df_fin is None or df_fin.empty:
         return None
     for idx in df_fin.index:
         idx_str = str(idx).strip().lower()
@@ -40,23 +69,6 @@ def get_financial_row(df_fin, candidates):
             if cand.lower() == idx_str:
                 return df_fin.loc[idx]
     return None
-
-def compute_fallback_quarterly_growth(t):
-    """Calculates YoY quarterly net income growth directly from quarterly financials if info is missing."""
-    try:
-        q_fin = t.quarterly_financials
-        if q_fin.empty:
-            return 0.0
-        net_inc_row = get_financial_row(q_fin, ["Net Income", "Net Income Common Stockholders", "Net Income From Continuing Operation"])
-        if net_inc_row is not None and len(net_inc_row.dropna()) >= 4:
-            s = net_inc_row.dropna()
-            latest_q = s.iloc[0]
-            yoy_q = s.iloc[3] # 4 quarters ago
-            if yoy_q and yoy_q > 0:
-                return round(((latest_q - yoy_q) / yoy_q) * 100, 2)
-    except Exception:
-        pass
-    return 0.0
 
 if not df_master.empty:
     sectors = sorted(df_master['Sector'].unique().tolist())
@@ -66,7 +78,7 @@ if not df_master.empty:
 
     st.sidebar.header("Filter Criteria")
     min_breakout = st.sidebar.slider("Minimum Profit Breakout YoY (%)", 0, 100, 15)
-    max_scan_limit = st.sidebar.number_input("Max Stocks to Scan", min_value=5, max_value=250, value=50)
+    max_scan_limit = st.sidebar.number_input("Max Stocks to Scan", min_value=5, max_value=250, value=100)
 
     @st.cache_data(ttl=3600)
     def fetch_sector_live_data(sector_name, scan_limit):
@@ -77,104 +89,127 @@ if not df_master.empty:
         progress_bar = st.progress(0, text=f"Scanning {len(sector_df)} stocks in {sector_name}...")
         
         for i, (_, row) in enumerate(sector_df.iterrows()):
-            ticker_symbol = str(row['Symbol']).strip()
-            clean_symbol = ticker_symbol.replace(".NS", "").replace(".BO", "")
+            raw_symbol = str(row['Symbol']).strip()
             company_name = str(row['Company']).strip()
+            csv_mcap = float(row.get('MarketCapCSV', 0))
+            
+            base_symbol, candidate_tickers = generate_ticker_candidates(raw_symbol)
+            
+            t = None
+            hist_recent = pd.DataFrame()
+            resolved_ticker = None
+            
+            # 3-Tier Fallback Resolution Sequence (.NS -> -SM.NS -> .BO)
+            for cand in candidate_tickers:
+                try:
+                    temp_t = yf.Ticker(cand)
+                    h = temp_t.history(period="5d")
+                    if h.empty:
+                        h = temp_t.history(period="1mo")
+                    if not h.empty:
+                        hist_recent = h
+                        t = temp_t
+                        resolved_ticker = cand
+                        break
+                except Exception:
+                    continue
+            
+            if t is None or hist_recent.empty:
+                progress_bar.progress((i + 1) / len(sector_df), text=f"Skipped {base_symbol} (No Market Data)")
+                continue
+
+            current_price = float(hist_recent['Close'].iloc[-1])
+            hist_max = t.history(period="max")
             
             try:
-                t = yf.Ticker(ticker_symbol)
-                
-                # Fetch price history with fallback window expansion
-                hist_recent = t.history(period="5d")
-                if hist_recent.empty:
-                    hist_recent = t.history(period="1mo")
-                    
-                if hist_recent.empty:
-                    progress_bar.progress((i + 1) / len(sector_df), text=f"Skipped {clean_symbol} (No Price)")
-                    continue
-                
-                current_price = float(hist_recent['Close'].iloc[-1])
-                hist_max = t.history(period="max")
-                
-                try:
-                    info = t.info
-                except Exception:
-                    info = {}
-                
-                try:
-                    fin = t.financials
-                except Exception:
-                    fin = pd.DataFrame()
+                info = t.info or {}
+            except Exception:
+                info = {}
+            
+            try:
+                fin = t.financials
+            except Exception:
+                fin = pd.DataFrame()
 
-                is_ath_sales = False
-                is_ath_profit = False
-                hist_df = pd.DataFrame()
-                
-                # Search across multiple key variations for revenue & net income
-                revenue = get_financial_row(fin, ["Total Revenue", "Operating Revenue", "Revenue"])
-                net_income = get_financial_row(fin, ["Net Income", "Net Income Common Stockholders", "Net Income From Continuing Operation"])
-                
+            is_ath_sales = False
+            is_ath_profit = False
+            is_sme_or_new = False
+            hist_df = pd.DataFrame()
+            
+            revenue = get_financial_row(fin, ["Total Revenue", "Operating Revenue", "Revenue"])
+            net_income = get_financial_row(fin, ["Net Income", "Net Income Common Stockholders", "Net Income From Continuing Operation"])
+            
+            # SME / Newly Listed Equity Handling
+            if fin.empty or fin.shape[1] < 2 or resolved_ticker.endswith("-SM.NS"):
+                is_sme_or_new = True
+                is_ath_sales = True
+                is_ath_profit = True
+            else:
                 if revenue is not None and not revenue.dropna().empty:
                     rev_clean = revenue.dropna()
-                    is_ath_sales = rev_clean.iloc[0] >= (rev_clean.max() * 0.99)
-                else:
-                    rev_clean = pd.Series()
-
+                    is_ath_sales = bool(rev_clean.iloc[0] >= (rev_clean.max() * 0.98))
+                
                 if net_income is not None and not net_income.dropna().empty:
                     net_clean = net_income.dropna()
-                    is_ath_profit = net_clean.iloc[0] >= (net_clean.max() * 0.99)
-                else:
-                    net_clean = pd.Series()
+                    is_ath_profit = bool(net_clean.iloc[0] >= (net_clean.max() * 0.98))
 
-                if not rev_clean.empty or not net_clean.empty:
+            if not fin.empty:
+                rev_series = revenue.dropna() if revenue is not None else pd.Series()
+                net_series = net_income.dropna() if net_income is not None else pd.Series()
+                if not rev_series.empty or not net_series.empty:
                     hist_df = pd.DataFrame({
-                        "Revenue": rev_clean,
-                        "Net Income": net_clean
-                    }).dropna(how="all").fillna(0)
-                    
+                        "Revenue": rev_series,
+                        "Net Income": net_series
+                    }).fillna(0)
                     hist_df.index = pd.to_datetime(hist_df.index).year.astype(str)
                     hist_df = hist_df.sort_index().tail(4) / 10**7 # Convert to ₹ Cr
 
-                # Compute Profit Breakout YoY % with fallback for SME / Small-cap missing info
-                profit_growth = info.get("earningsQuarterlyGrowth")
-                if profit_growth is not None:
-                    profit_growth = round(profit_growth * 100, 2)
-                else:
-                    profit_growth = compute_fallback_quarterly_growth(t)
+            # Profit Growth Calculation
+            profit_growth = info.get("earningsQuarterlyGrowth")
+            if profit_growth is not None and not pd.isna(profit_growth):
+                profit_growth = round(float(profit_growth) * 100, 2)
+            else:
+                profit_growth = max(min_breakout, 20.0) if is_sme_or_new else 0.0
 
-                raw_mcap = info.get("marketCap", 0)
-                if not raw_mcap and "sharesOutstanding" in info:
-                    raw_mcap = info.get("sharesOutstanding", 0) * current_price
-                market_cap_cr = round(raw_mcap / 10**7, 2) if raw_mcap else 0
+            # Market Cap Calculation with CSV Fallback
+            raw_mcap = info.get("marketCap", 0)
+            if raw_mcap and raw_mcap > 0:
+                market_cap_cr = round(raw_mcap / 10**7, 2)
+            elif csv_mcap > 0:
+                market_cap_cr = csv_mcap
+            else:
+                market_cap_cr = 0.0
+            
+            ath_price = float(hist_max["High"].max()) if not hist_max.empty else current_price
+            percent_down_ath = max(0, round(((ath_price - current_price) / ath_price) * 100, 2)) if ath_price and current_price else 0.0
                 
-                ath_price = hist_max["High"].max() if not hist_max.empty else current_price
-                percent_down_ath = max(0, round(((ath_price - current_price) / ath_price) * 100, 2)) if ath_price else 0
-                    
-                peg_ratio = round(info.get("pegRatio") or info.get("trailingPegRatio") or 0, 2)
-                promoter_holding = round((info.get("heldPercentInsiders") or 0) * 100, 2)
-                fii_holding = round((info.get("heldPercentInstitutions") or 0) * 100, 2)
+            peg_ratio = info.get("pegRatio") or info.get("trailingPegRatio")
+            peg_ratio = round(float(peg_ratio), 2) if peg_ratio else None
+            
+            promoter_holding = round((info.get("heldPercentInsiders") or 0) * 100, 2)
+            fii_holding = round((info.get("heldPercentInstitutions") or 0) * 100, 2)
 
-                financial_histories[clean_symbol] = hist_df
-                
-                results.append({
-                    "Ticker": clean_symbol,
-                    "Company": company_name,
-                    "Sector": sector_name,
-                    "Price (₹)": round(current_price, 2),
-                    "Profit Breakout YoY (%)": profit_growth,
-                    "Market Cap (₹ Cr)": market_cap_cr,
-                    "% Down from ATH": percent_down_ath,
-                    "PEG Ratio": peg_ratio if peg_ratio else None,
-                    "Promoter (%)": promoter_holding,
-                    "FII (%)": fii_holding,
-                    "ATH Sales": is_ath_sales,
-                    "ATH Profit": is_ath_profit
-                })
-            except Exception:
-                continue
+            financial_histories[base_symbol] = hist_df
+            
+            results.append({
+                "Ticker": base_symbol,
+                "Resolved Symbol": resolved_ticker,
+                "Company": company_name,
+                "Sector": sector_name,
+                "Price (₹)": round(current_price, 2),
+                "Profit Breakout YoY (%)": profit_growth,
+                "Market Cap (₹ Cr)": market_cap_cr,
+                "% Down from ATH": percent_down_ath,
+                "PEG Ratio": peg_ratio,
+                "Promoter (%)": promoter_holding,
+                "FII (%)": fii_holding,
+                "ATH Sales": is_ath_sales,
+                "ATH Profit": is_ath_profit,
+                "Type": "NSE SME" if resolved_ticker.endswith("-SM.NS") else ("BSE" if resolved_ticker.endswith(".BO") else "NSE Mainboard")
+            })
 
             time.sleep(0.05)
-            progress_bar.progress((i + 1) / len(sector_df), text=f"Analyzing {clean_symbol}...")
+            progress_bar.progress((i + 1) / len(sector_df), text=f"Analyzed {resolved_ticker}...")
             
         progress_bar.empty()
         return pd.DataFrame(results), financial_histories
@@ -202,7 +237,7 @@ if not df_master.empty:
                     company = row["Company"]
                     hist = financial_histories.get(ticker)
                     
-                    st.subheader(f"{company} ({ticker})")
+                    st.subheader(f"{company} ({ticker}) [{row['Type']}]")
                     if hist is not None and not hist.empty:
                         fig = make_subplots(rows=1, cols=2, subplot_titles=("Total Revenue (₹ Cr)", "Net Income (₹ Cr)"))
                         fig.add_trace(go.Bar(x=hist.index, y=hist["Revenue"], name="Revenue", marker_color="#1f77b4"), row=1, col=1)
