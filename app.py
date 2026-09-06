@@ -2,13 +2,13 @@ import time
 import streamlit as st
 import pandas as pd
 import yfinance as yf
+import requests
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
 st.set_page_config(page_title="Live Sector Breakout Screener", layout="wide")
 st.title("📈 Live Sector Breakout Screener")
 
-# 1. Load Sector, Company, Symbol, and Market Cap from master_stock_list.csv
 @st.cache_data(ttl=86400)
 def load_stock_master():
     try:
@@ -36,11 +36,6 @@ def load_stock_master():
 df_master = load_stock_master()
 
 def generate_ticker_candidates(raw_symbol, company_name=""):
-    """
-    Generates ordered ticker candidates:
-    - Numeric Tickers: Base + .BO / First name + .BO
-    - Non-Numeric Tickers: .NS / NSE SME -SM.NS
-    """
     clean = str(raw_symbol).strip()
     if clean.endswith(".0"):
         clean = clean[:-2]
@@ -72,7 +67,6 @@ def generate_ticker_candidates(raw_symbol, company_name=""):
     return base, ordered
 
 def get_financial_row(df_fin, candidates):
-    """Flexible lookup for Yahoo Finance financial row names."""
     if df_fin is None or df_fin.empty:
         return None
     for idx in df_fin.index:
@@ -97,6 +91,11 @@ if not df_master.empty:
 
     @st.cache_data(ttl=3600)
     def fetch_sector_live_data(sector_names, scan_limit):
+        session = requests.Session()
+        session.headers.update({
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        })
+
         sector_df = df_master[df_master['Sector'].isin(sector_names)].head(scan_limit)
         results = []
         unfetched = []
@@ -117,7 +116,7 @@ if not df_master.empty:
             
             for cand in candidate_tickers:
                 try:
-                    temp_t = yf.Ticker(cand)
+                    temp_t = yf.Ticker(cand, session=session)
                     h = temp_t.history(period="5d")
                     if h.empty:
                         h = temp_t.history(period="1mo")
@@ -135,7 +134,7 @@ if not df_master.empty:
                     "Ticker": base_symbol, 
                     "Company": company_name, 
                     "Sector": row['Sector'],
-                    "Reason": "No Market Data Found"
+                    "Reason": "No Market Data Found / 401 Unauthorized"
                 })
                 continue
 
@@ -185,7 +184,6 @@ if not df_master.empty:
                     hist_df = hist_df.groupby(hist_df.index).first()
                     hist_df = hist_df.sort_index().tail(4) / 10**7 
 
-            # Handle Nulls instead of 0s for missing data
             profit_growth = info.get("earningsQuarterlyGrowth")
             if profit_growth is not None and not pd.isna(profit_growth):
                 profit_growth = round(float(profit_growth) * 100, 2)
@@ -203,7 +201,6 @@ if not df_master.empty:
             ath_price = float(hist_max["High"].max()) if not hist_max.empty else current_price
             percent_down_ath = max(0, round(((ath_price - current_price) / ath_price) * 100, 2)) if ath_price and current_price else None
                 
-            # PEG Fallback Calculation
             peg_ratio = info.get("pegRatio") or info.get("trailingPegRatio")
             if not peg_ratio:
                 pe = info.get("trailingPE") or info.get("forwardPE")
@@ -249,7 +246,6 @@ if not df_master.empty:
         df, financial_histories, unfetched_df = fetch_sector_live_data(selected_sectors, max_scan_limit)
         
         if not df.empty:
-            # Filter Logic (Safely filling nulls as 0 just for comparison)
             filtered_df = df[
                 (df["ATH Sales"] == True) & 
                 (df["ATH Profit"] == True) & 
@@ -265,7 +261,6 @@ if not df_master.empty:
                     asc_pass = st.radio("Order:", ["Descending", "Ascending"], horizontal=True, key="asc_pass") == "Ascending"
                 
                 sorted_filtered = filtered_df.sort_values(by=sort_pass, ascending=asc_pass)
-                # Fill nulls with "NA" strictly for rendering
                 st.dataframe(sorted_filtered.fillna("NA"), use_container_width=True, hide_index=True)
                 
                 st.markdown("---")
@@ -296,7 +291,6 @@ if not df_master.empty:
                 sorted_failed = failed_df.sort_values(by=sort_fail, ascending=asc_fail)
                 st.dataframe(sorted_failed.fillna("NA"), use_container_width=True, hide_index=True)
         
-        # Display Unfetched Companies at the bottom
         if not unfetched_df.empty:
             st.markdown("---")
             st.subheader(f"⚠️ Unfetched Data ({len(unfetched_df)} companies)")
