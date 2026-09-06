@@ -57,7 +57,7 @@ def generate_ticker_candidates(raw_symbol, company_name=""):
     if company_clean:
         words = [w for w in company_clean.split() if w.strip()]
         if words:
-            company_first_name = "".join(ch.upper() for ch in words[0]
+            company_first_name = "".join(ch.upper() for ch in words[0])
             
     if base.isdigit():
         candidates = [f"{base}.BO"]
