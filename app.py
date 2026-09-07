@@ -24,7 +24,12 @@ yf_session = get_yf_session()
 
 # Helper function to safely format dataframes for PyArrow / Streamlit display
 def format_df_for_display(df):
-    return df.fillna("NA").astype(str)
+    df_copy = df.copy()
+    # Convert booleans to tick box symbols for ATH Sales & ATH Profit
+    for col in ["ATH Sales", "ATH Profit"]:
+        if col in df_copy.columns:
+            df_copy[col] = df_copy[col].replace({True: "☑", False: "☐"})
+    return df_copy.fillna("NA").astype(str)
 
 # Load stock master list
 @st.cache_data(ttl=86400)
@@ -208,13 +213,12 @@ if not df_master.empty:
                     hist_df = hist_df.groupby(hist_df.index).first()
                     hist_df = hist_df.sort_index().tail(4) / 10**7 
 
-            # Profit Growth Calculation Fix (Dynamic calculation with no hardcoded fallback)
+            # Profit Growth Calculation
             profit_growth = info.get("earningsQuarterlyGrowth")
             if profit_growth is not None and not pd.isna(profit_growth):
                 profit_growth = round(float(profit_growth) * 100, 2)
             else:
                 profit_growth = None
-                # Fallback 1: Calculate YoY change from Quarterly Financials (Q1 vs Q-4)
                 q_net = get_financial_row(q_fin, ["Net Income", "Net Income Common Stockholders", "Net Income From Continuing Operation"])
                 if q_net is not None and not q_net.dropna().empty:
                     q_clean = q_net.dropna()
@@ -229,7 +233,6 @@ if not df_master.empty:
                         if q_prev != 0:
                             profit_growth = round(((q_curr - q_prev) / abs(q_prev)) * 100, 2)
 
-                # Fallback 2: Calculate YoY change from Annual Financials
                 if profit_growth is None and net_income is not None and not net_income.dropna().empty:
                     net_clean = net_income.dropna()
                     if len(net_clean) >= 2:
