@@ -22,6 +22,10 @@ def get_yf_session():
 
 yf_session = get_yf_session()
 
+# Helper function to safely format dataframes for PyArrow / Streamlit display
+def format_df_for_display(df):
+    return df.fillna("NA").astype(str)
+
 # Load stock master list
 @st.cache_data(ttl=86400)
 def load_stock_master():
@@ -124,7 +128,6 @@ if not df_master.empty:
             resolved_ticker = None
             fetch_error_msg = "No Market Data Found"
             
-            # Resolution loop with session injection
             for cand in candidate_tickers:
                 try:
                     temp_t = yf.Ticker(cand, session=yf_session)
@@ -167,6 +170,11 @@ if not df_master.empty:
             except Exception:
                 fin = pd.DataFrame()
 
+            try:
+                q_fin = t.quarterly_financials
+            except Exception:
+                q_fin = pd.DataFrame()
+
             is_ath_sales = False
             is_ath_profit = False
             is_sme_or_new = False
@@ -200,11 +208,35 @@ if not df_master.empty:
                     hist_df = hist_df.groupby(hist_df.index).first()
                     hist_df = hist_df.sort_index().tail(4) / 10**7 
 
+            # Profit Growth Calculation Fix (Dynamic calculation with no hardcoded fallback)
             profit_growth = info.get("earningsQuarterlyGrowth")
             if profit_growth is not None and not pd.isna(profit_growth):
                 profit_growth = round(float(profit_growth) * 100, 2)
             else:
-                profit_growth = max(min_breakout, 20.0) if is_sme_or_new else None
+                profit_growth = None
+                # Fallback 1: Calculate YoY change from Quarterly Financials (Q1 vs Q-4)
+                q_net = get_financial_row(q_fin, ["Net Income", "Net Income Common Stockholders", "Net Income From Continuing Operation"])
+                if q_net is not None and not q_net.dropna().empty:
+                    q_clean = q_net.dropna()
+                    if len(q_clean) >= 5:
+                        q_curr = float(q_clean.iloc[0])
+                        q_prev_yr = float(q_clean.iloc[4])
+                        if q_prev_yr != 0:
+                            profit_growth = round(((q_curr - q_prev_yr) / abs(q_prev_yr)) * 100, 2)
+                    elif len(q_clean) >= 2:
+                        q_curr = float(q_clean.iloc[0])
+                        q_prev = float(q_clean.iloc[1])
+                        if q_prev != 0:
+                            profit_growth = round(((q_curr - q_prev) / abs(q_prev)) * 100, 2)
+
+                # Fallback 2: Calculate YoY change from Annual Financials
+                if profit_growth is None and net_income is not None and not net_income.dropna().empty:
+                    net_clean = net_income.dropna()
+                    if len(net_clean) >= 2:
+                        curr_net = float(net_clean.iloc[0])
+                        prev_net = float(net_clean.iloc[1])
+                        if prev_net != 0:
+                            profit_growth = round(((curr_net - prev_net) / abs(prev_net)) * 100, 2)
 
             raw_mcap = info.get("marketCap")
             if raw_mcap and float(raw_mcap) > 0:
@@ -220,9 +252,8 @@ if not df_master.empty:
             peg_ratio = info.get("pegRatio") or info.get("trailingPegRatio")
             if not peg_ratio:
                 pe = info.get("trailingPE") or info.get("forwardPE")
-                raw_growth = info.get("earningsQuarterlyGrowth")
-                if pe and raw_growth and float(raw_growth) > 0:
-                    peg_ratio = float(pe) / (float(raw_growth) * 100)
+                if pe and profit_growth and profit_growth > 0:
+                    peg_ratio = float(pe) / profit_growth
             peg_ratio = round(float(peg_ratio), 2) if peg_ratio else None
             
             insiders = info.get("heldPercentInsiders")
@@ -250,7 +281,7 @@ if not df_master.empty:
                 "Type": "NSE SME" if resolved_ticker.endswith("-SM.NS") else ("BSE" if resolved_ticker.endswith(".BO") else "NSE Mainboard")
             })
 
-            time.sleep(0.1)  # Gentle request spacing to avoid 429 back-off blocks
+            time.sleep(0.1)
             progress_bar.progress((i + 1) / len(sector_df), text=f"Analyzed {resolved_ticker}...")
             
         progress_bar.empty()
@@ -277,7 +308,7 @@ if not df_master.empty:
                     asc_pass = st.radio("Order:", ["Descending", "Ascending"], horizontal=True, key="asc_pass") == "Ascending"
                 
                 sorted_filtered = filtered_df.sort_values(by=sort_pass, ascending=asc_pass)
-                st.dataframe(sorted_filtered.fillna("NA"), use_container_width=True, hide_index=True)
+                st.dataframe(format_df_for_display(sorted_filtered), use_container_width=True, hide_index=True)
                 
                 st.markdown("---")
                 st.subheader("📊 Financial Trajectory (₹ Crores)")
@@ -305,7 +336,7 @@ if not df_master.empty:
                     asc_fail = st.radio("Order:", ["Descending", "Ascending"], horizontal=True, key="asc_fail") == "Ascending"
                     
                 sorted_failed = failed_df.sort_values(by=sort_fail, ascending=asc_fail)
-                st.dataframe(sorted_failed.fillna("NA"), use_container_width=True, hide_index=True)
+                st.dataframe(format_df_for_display(sorted_failed), use_container_width=True, hide_index=True)
         
         if not unfetched_df.empty:
             st.markdown("---")
@@ -317,4 +348,4 @@ if not df_master.empty:
                 asc_unf = st.radio("Order:", ["Descending", "Ascending"], horizontal=True, key="asc_unf") == "Ascending"
             
             sorted_unf = unfetched_df.sort_values(by=sort_unf, ascending=asc_unf)
-            st.dataframe(sorted_unf.fillna("NA"), use_container_width=True, hide_index=True)
+            st.dataframe(format_df_for_display(sorted_unf), use_container_width=True, hide_index=True)
