@@ -1,9 +1,12 @@
+import io
+import sys
 import time
 import requests
 import streamlit as st
 import pandas as pd
 import yfinance as yf
 import plotly.graph_objects as go
+from contextlib import redirect_stdout, redirect_stderr
 from plotly.subplots import make_subplots
 
 st.set_page_config(page_title="Live Sector Breakout Screener", layout="wide")
@@ -24,12 +27,17 @@ yf_session = get_yf_session()
 
 # Helper function to safely format dataframes for PyArrow / Streamlit display
 def format_df_for_display(df):
-    df_copy = df.copy()
-    # Convert booleans to tick box symbols for ATH Sales & ATH Profit
-    for col in ["ATH Sales", "ATH Profit"]:
-        if col in df_copy.columns:
-            df_copy[col] = df_copy[col].replace({True: "☑", False: "☐"})
-    return df_copy.fillna("NA").astype(str)
+    if df.empty:
+        return df
+    df_display = df.copy()
+    
+    # Map boolean columns to visual indicators
+    bool_cols = ["ATH Sales", "ATH Profit"]
+    for col in bool_cols:
+        if col in df_display.columns:
+            df_display[col] = df_display[col].map({True: "✅", False: "❌"})
+            
+    return df_display.fillna("NA").astype(str)
 
 # Load stock master list
 @st.cache_data(ttl=86400)
@@ -135,10 +143,14 @@ if not df_master.empty:
             
             for cand in candidate_tickers:
                 try:
-                    temp_t = yf.Ticker(cand, session=yf_session)
-                    h = temp_t.history(period="5d")
-                    if h.empty:
-                        h = temp_t.history(period="1mo")
+                    # Suppress library output to eliminate duplicate console warning noise
+                    buf = io.StringIO()
+                    with redirect_stdout(buf), redirect_stderr(buf):
+                        temp_t = yf.Ticker(cand, session=yf_session)
+                        h = temp_t.history(period="5d")
+                        if h.empty:
+                            h = temp_t.history(period="1mo")
+                            
                     if not h.empty:
                         hist_recent = h
                         t = temp_t
@@ -160,25 +172,27 @@ if not df_master.empty:
 
             current_price = float(hist_recent['Close'].iloc[-1])
             
-            try:
-                hist_max = t.history(period="max")
-            except Exception:
-                hist_max = pd.DataFrame()
-            
-            try:
-                info = t.info or {}
-            except Exception:
-                info = {}
-            
-            try:
-                fin = t.financials
-            except Exception:
-                fin = pd.DataFrame()
+            buf = io.StringIO()
+            with redirect_stdout(buf), redirect_stderr(buf):
+                try:
+                    hist_max = t.history(period="max")
+                except Exception:
+                    hist_max = pd.DataFrame()
+                
+                try:
+                    info = t.info or {}
+                except Exception:
+                    info = {}
+                
+                try:
+                    fin = t.financials
+                except Exception:
+                    fin = pd.DataFrame()
 
-            try:
-                q_fin = t.quarterly_financials
-            except Exception:
-                q_fin = pd.DataFrame()
+                try:
+                    q_fin = t.quarterly_financials
+                except Exception:
+                    q_fin = pd.DataFrame()
 
             is_ath_sales = False
             is_ath_profit = False
@@ -213,7 +227,6 @@ if not df_master.empty:
                     hist_df = hist_df.groupby(hist_df.index).first()
                     hist_df = hist_df.sort_index().tail(4) / 10**7 
 
-            # Profit Growth Calculation
             profit_growth = info.get("earningsQuarterlyGrowth")
             if profit_growth is not None and not pd.isna(profit_growth):
                 profit_growth = round(float(profit_growth) * 100, 2)
@@ -311,7 +324,7 @@ if not df_master.empty:
                     asc_pass = st.radio("Order:", ["Descending", "Ascending"], horizontal=True, key="asc_pass") == "Ascending"
                 
                 sorted_filtered = filtered_df.sort_values(by=sort_pass, ascending=asc_pass)
-                st.dataframe(format_df_for_display(sorted_filtered), use_container_width=True, hide_index=True)
+                st.dataframe(format_df_for_display(sorted_filtered), width="stretch", hide_index=True)
                 
                 st.markdown("---")
                 st.subheader("📊 Financial Trajectory (₹ Crores)")
@@ -326,7 +339,7 @@ if not df_master.empty:
                         fig.add_trace(go.Bar(x=hist.index, y=hist["Revenue"], name="Revenue", marker_color="#1f77b4"), row=1, col=1)
                         fig.add_trace(go.Bar(x=hist.index, y=hist["Net Income"], name="Net Income", marker_color="#2ca02c"), row=1, col=2)
                         fig.update_layout(height=300, showlegend=False)
-                        st.plotly_chart(fig, use_container_width=True)
+                        st.plotly_chart(fig, width="stretch")
             
             st.markdown("---")
             st.subheader("❌ Did Not Meet Criteria")
@@ -339,7 +352,7 @@ if not df_master.empty:
                     asc_fail = st.radio("Order:", ["Descending", "Ascending"], horizontal=True, key="asc_fail") == "Ascending"
                     
                 sorted_failed = failed_df.sort_values(by=sort_fail, ascending=asc_fail)
-                st.dataframe(format_df_for_display(sorted_failed), use_container_width=True, hide_index=True)
+                st.dataframe(format_df_for_display(sorted_failed), width="stretch", hide_index=True)
         
         if not unfetched_df.empty:
             st.markdown("---")
@@ -351,4 +364,4 @@ if not df_master.empty:
                 asc_unf = st.radio("Order:", ["Descending", "Ascending"], horizontal=True, key="asc_unf") == "Ascending"
             
             sorted_unf = unfetched_df.sort_values(by=sort_unf, ascending=asc_unf)
-            st.dataframe(format_df_for_display(sorted_unf), use_container_width=True, hide_index=True)
+            st.dataframe(format_df_for_display(sorted_unf), width="stretch", hide_index=True)
