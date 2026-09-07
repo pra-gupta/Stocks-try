@@ -1,14 +1,28 @@
 import time
+import requests
 import streamlit as st
 import pandas as pd
 import yfinance as yf
-import requests
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
 st.set_page_config(page_title="Live Sector Breakout Screener", layout="wide")
 st.title("📈 Live Sector Breakout Screener")
 
+# Cached custom request session to prevent Streamlit 401 re-authentication drops
+@st.cache_resource
+def get_yf_session():
+    session = requests.Session()
+    session.headers.update({
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+    })
+    return session
+
+yf_session = get_yf_session()
+
+# Load stock master list
 @st.cache_data(ttl=86400)
 def load_stock_master():
     try:
@@ -91,11 +105,6 @@ if not df_master.empty:
 
     @st.cache_data(ttl=3600)
     def fetch_sector_live_data(sector_names, scan_limit):
-        session = requests.Session()
-        session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-        })
-
         sector_df = df_master[df_master['Sector'].isin(sector_names)].head(scan_limit)
         results = []
         unfetched = []
@@ -113,10 +122,12 @@ if not df_master.empty:
             t = None
             hist_recent = pd.DataFrame()
             resolved_ticker = None
+            fetch_error_msg = "No Market Data Found"
             
+            # Resolution loop with session injection
             for cand in candidate_tickers:
                 try:
-                    temp_t = yf.Ticker(cand, session=session)
+                    temp_t = yf.Ticker(cand, session=yf_session)
                     h = temp_t.history(period="5d")
                     if h.empty:
                         h = temp_t.history(period="1mo")
@@ -125,21 +136,26 @@ if not df_master.empty:
                         t = temp_t
                         resolved_ticker = cand
                         break
-                except Exception:
+                except Exception as err:
+                    fetch_error_msg = f"HTTP Error / Blocked: {str(err)}"
                     continue
             
             if t is None or hist_recent.empty:
-                progress_bar.progress((i + 1) / len(sector_df), text=f"Skipped {base_symbol} (No Market Data)")
+                progress_bar.progress((i + 1) / len(sector_df), text=f"Skipped {base_symbol}")
                 unfetched.append({
                     "Ticker": base_symbol, 
                     "Company": company_name, 
                     "Sector": row['Sector'],
-                    "Reason": "No Market Data Found / 401 Unauthorized"
+                    "Reason": fetch_error_msg
                 })
                 continue
 
             current_price = float(hist_recent['Close'].iloc[-1])
-            hist_max = t.history(period="max")
+            
+            try:
+                hist_max = t.history(period="max")
+            except Exception:
+                hist_max = pd.DataFrame()
             
             try:
                 info = t.info or {}
@@ -234,7 +250,7 @@ if not df_master.empty:
                 "Type": "NSE SME" if resolved_ticker.endswith("-SM.NS") else ("BSE" if resolved_ticker.endswith(".BO") else "NSE Mainboard")
             })
 
-            time.sleep(0.05)
+            time.sleep(0.1)  # Gentle request spacing to avoid 429 back-off blocks
             progress_bar.progress((i + 1) / len(sector_df), text=f"Analyzed {resolved_ticker}...")
             
         progress_bar.empty()
@@ -264,7 +280,7 @@ if not df_master.empty:
                 st.dataframe(sorted_filtered.fillna("NA"), use_container_width=True, hide_index=True)
                 
                 st.markdown("---")
-                st.header("📊 Financial Trajectory (₹ Crores)")
+                st.subheader("📊 Financial Trajectory (₹ Crores)")
                 for _, row in sorted_filtered.iterrows():
                     ticker = row["Ticker"]
                     company = row["Company"]
